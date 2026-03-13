@@ -205,20 +205,31 @@ def cosine_sim_score(query: str, chunks: list[str], embeddings) -> float:
     sims   = cosine_similarity([q_emb], c_embs)[0]
     return float(np.max(sims))
 
+MAX_CONTEXT_CHARS = 6000
+
+def truncate_context(text: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    return text[:max_chars] + "\n\n[... contexto truncado ...]" if len(text) > max_chars else text
+
 def call_llm(client, model, temperature, messages) -> tuple[str, float]:
+    safe_messages = []
+    for m in messages:
+        content = m["content"]
+        if isinstance(content, str) and len(content) > 12000:
+            content = content[:12000] + "\n[truncado]"
+        safe_messages.append({"role": m["role"], "content": content})
     t0 = time.time()
     resp = client.chat.completions.create(
         model=model,
-        messages=messages,
+        messages=safe_messages,
         temperature=temperature,
-        max_tokens=1024,
+        max_tokens=512,
     )
     return resp.choices[0].message.content, round(time.time() - t0, 2)
 
-def retrieve_context(store, query: str, k: int) -> tuple[list[str], list[str]]:
+def retrieve_context(store, query: str, k: int) -> tuple[str, list[str]]:
     docs = store.similarity_search(query, k=k)
     chunks = [d.page_content for d in docs]
-    context = "\n\n---\n\n".join(chunks)
+    context = truncate_context("\n\n---\n\n".join(chunks))
     return context, chunks
 
 # ─────────────────────────────────────────────
@@ -279,45 +290,49 @@ if run:
     # ── 1. LLM Simple ──
     with c1:
         st.markdown('<div class="col-header col-llm">⚡ LLM Simple (Zero-shot)</div>', unsafe_allow_html=True)
-        with st.spinner("Generando…"):
-            msgs_simple = []
-            if sys_no_se:
-                msgs_simple.append({"role": "system", "content": sys_no_se})
-            msgs_simple.append({"role": "user", "content": query})
-            ans1, t1 = call_llm(client, model_name, temperature, msgs_simple)
-
-        st.markdown(f'<div class="answer-box">{ans1}</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<span class="badge badge-time">⏱ {t1}s</span>'
-            f'<span class="badge badge-sim">~ Sin RAG</span>',
-            unsafe_allow_html=True
-        )
+        try:
+            with st.spinner("Generando…"):
+                msgs_simple = []
+                if sys_no_se:
+                    msgs_simple.append({"role": "system", "content": sys_no_se})
+                msgs_simple.append({"role": "user", "content": query[:800]})
+                ans1, t1 = call_llm(client, model_name, temperature, msgs_simple)
+            st.markdown(f'<div class="answer-box">{ans1}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<span class="badge badge-time">⏱ {t1}s</span>'
+                f'<span class="badge badge-sim">~ Sin RAG</span>',
+                unsafe_allow_html=True
+            )
+        except Exception as e:
+            st.error(f"❌ Error LLM Simple: {str(e)[:300]}")
 
     # ── 2. RAG Default ──
     with c2:
         st.markdown('<div class="col-header col-rag">🧩 RAG Estándar (default)</div>', unsafe_allow_html=True)
         if vector_store_default:
-            with st.spinner("Recuperando…"):
-                ctx2, chunks2 = retrieve_context(vector_store_default, query, 3)
-                sim2 = cosine_sim_score(query, chunks2, embeddings)
-                sys2_content = "Usa SOLO el contexto proporcionado para responder."
-                if sys_no_se:
-                    sys2_content = sys_no_se
-                msgs2 = [
-                    {"role": "system", "content": sys2_content},
-                    {"role": "user", "content": f"Contexto:\n{ctx2}\n\nPregunta: {query}"}
-                ]
-                ans2, t2 = call_llm(client, model_name, temperature, msgs2)
-
-            st.markdown(f'<div class="answer-box">{ans2}</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<span class="badge badge-time">⏱ {t2}s</span>'
-                f'<span class="badge badge-sim">coseno: {sim2:.3f}</span>',
-                unsafe_allow_html=True
-            )
-            with st.expander("📎 Fragmentos recuperados (default)"):
-                for i, ch in enumerate(chunks2):
-                    st.markdown(f"**Chunk {i+1}:** {ch[:300]}…")
+            try:
+                with st.spinner("Recuperando…"):
+                    ctx2, chunks2 = retrieve_context(vector_store_default, query, 3)
+                    sim2 = cosine_sim_score(query, chunks2, embeddings)
+                    sys2_content = "Usa SOLO el contexto proporcionado para responder."
+                    if sys_no_se:
+                        sys2_content = sys_no_se
+                    msgs2 = [
+                        {"role": "system", "content": sys2_content},
+                        {"role": "user", "content": f"Contexto:\n{ctx2}\n\nPregunta: {query[:800]}"}
+                    ]
+                    ans2, t2 = call_llm(client, model_name, temperature, msgs2)
+                st.markdown(f'<div class="answer-box">{ans2}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<span class="badge badge-time">⏱ {t2}s</span>'
+                    f'<span class="badge badge-sim">coseno: {sim2:.3f}</span>',
+                    unsafe_allow_html=True
+                )
+                with st.expander("📎 Fragmentos recuperados (default)"):
+                    for i, ch in enumerate(chunks2):
+                        st.markdown(f"**Chunk {i+1}:** {ch[:300]}…")
+            except Exception as e:
+                st.error(f"❌ Error RAG Default: {str(e)[:300]}")
         else:
             st.warning("No hay vector store disponible.")
 
@@ -325,27 +340,29 @@ if run:
     with c3:
         st.markdown('<div class="col-header col-opt">🎯 RAG Optimizado (sidebar)</div>', unsafe_allow_html=True)
         if vector_store_optimized:
-            with st.spinner("Recuperando…"):
-                ctx3, chunks3 = retrieve_context(vector_store_optimized, query, top_k)
-                sim3 = cosine_sim_score(query, chunks3, embeddings)
-                sys3_content = "Usa SOLO el contexto proporcionado para responder con precisión."
-                if sys_no_se:
-                    sys3_content = sys_no_se
-                msgs3 = [
-                    {"role": "system", "content": sys3_content},
-                    {"role": "user", "content": f"Contexto:\n{ctx3}\n\nPregunta: {query}"}
-                ]
-                ans3, t3 = call_llm(client, model_name, temperature, msgs3)
-
-            st.markdown(f'<div class="answer-box">{ans3}</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<span class="badge badge-time">⏱ {t3}s</span>'
-                f'<span class="badge badge-sim">coseno: {sim3:.3f}</span>',
-                unsafe_allow_html=True
-            )
-            with st.expander("📎 Fragmentos recuperados (optimizado)"):
-                for i, ch in enumerate(chunks3):
-                    st.markdown(f"**Chunk {i+1}:** {ch[:300]}…")
+            try:
+                with st.spinner("Recuperando…"):
+                    ctx3, chunks3 = retrieve_context(vector_store_optimized, query, top_k)
+                    sim3 = cosine_sim_score(query, chunks3, embeddings)
+                    sys3_content = "Usa SOLO el contexto proporcionado para responder con precisión."
+                    if sys_no_se:
+                        sys3_content = sys_no_se
+                    msgs3 = [
+                        {"role": "system", "content": sys3_content},
+                        {"role": "user", "content": f"Contexto:\n{ctx3}\n\nPregunta: {query[:800]}"}
+                    ]
+                    ans3, t3 = call_llm(client, model_name, temperature, msgs3)
+                st.markdown(f'<div class="answer-box">{ans3}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<span class="badge badge-time">⏱ {t3}s</span>'
+                    f'<span class="badge badge-sim">coseno: {sim3:.3f}</span>',
+                    unsafe_allow_html=True
+                )
+                with st.expander("📎 Fragmentos recuperados (optimizado)"):
+                    for i, ch in enumerate(chunks3):
+                        st.markdown(f"**Chunk {i+1}:** {ch[:300]}…")
+            except Exception as e:
+                st.error(f"❌ Error RAG Optimizado: {str(e)[:300]}")
         else:
             st.warning("No hay vector store disponible.")
 
