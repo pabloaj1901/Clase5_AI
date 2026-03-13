@@ -134,8 +134,8 @@ with st.sidebar:
     st.markdown("---")
     model_name = st.selectbox(
         "🤖 Modelo LLM",
-        ["llama3-70b-8192", "mixtral-8x7b-32768", "llama3-8b-8192"],
-        help="Llama 3 70B o Mixtral 8x7B"
+        ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
+        help="Modelos activos en Groq (2025)"
     )
 
     temperature = st.slider("🌡️ Temperature", 0.0, 1.0, 0.2, 0.05)
